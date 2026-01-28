@@ -421,9 +421,9 @@ flowchart TD
         JDG --> REC[Recommendations]
     end
 
-    subgraph Compare["🔄 Model Comparison (Optional)"]
+    subgraph Compare["🔄 Model Comparison Optional"]
         CMP[Run Comparison]
-        CMP --> REPLAY[Replay diagnose() per model]
+        CMP --> REPLAY["Replay diagnose per model"]
         REPLAY --> JAC[Jaccard Similarity]
         REPLAY --> SPEAR[Spearman Correlation]
         REPLAY --> DRIFT[Confidence Drift]
