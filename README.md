@@ -63,6 +63,539 @@ The system is designed for clinical research purposes and follows strict safety 
 
 ---
 
+## Complete System Architecture
+
+### High-Level Architecture
+
+```mermaid
+flowchart TB
+    subgraph Client["🖥️ Client (Browser)"]
+        UI[React UI]
+        ChatComponent[Chat Component]
+        MultimodalInput[Multimodal Input]
+        DSM5Toggle[DSM-5 Mode Toggle]
+        ReportViewer[Report Viewer]
+        BenchmarkCard[Benchmark Report Card]
+    end
+
+    subgraph API["⚡ Next.js API Routes"]
+        ChatAPI["/api/chat"]
+        ReportAPI["/api/report/generate"]
+        BenchmarkAPI["/api/benchmark/run"]
+        SessionAPI["/api/dsm/session"]
+    end
+
+    subgraph Agent["🤖 DSM-5 Agent"]
+        StateMachine[State Machine]
+        ToolOrchestrator[Tool Orchestrator]
+        PromptBuilder[Prompt Builder]
+    end
+
+    subgraph Tools["🔧 Agent Tools"]
+        CheckSafety[checkSafety]
+        GetNextQuestion[getNextQuestion]
+        ScoreResponse[scoreResponse]
+        Diagnose[diagnose]
+        GenerateReport[generateReport]
+    end
+
+    subgraph RAG["📚 RAG System"]
+        Retriever[DSM Retriever]
+        Embeddings[OpenAI Embeddings]
+        VectorSearch[pgvector Search]
+    end
+
+    subgraph Database["🗄️ PostgreSQL + pgvector"]
+        ChatTable[(Chat)]
+        MessageTable[(Message)]
+        DsmSession[(DsmSession)]
+        DsmItemResponse[(DsmItemResponse)]
+        DsmChunk[(DsmChunk)]
+        BenchmarkRun[(BenchmarkRun)]
+    end
+
+    subgraph LLM["🧠 LLM Providers"]
+        Gateway[Vercel AI Gateway]
+        OpenAI[OpenAI]
+        Anthropic[Anthropic]
+        Google[Google]
+    end
+
+    %% Client to API
+    UI --> ChatComponent
+    ChatComponent --> MultimodalInput
+    MultimodalInput --> DSM5Toggle
+    MultimodalInput -->|"POST /api/chat"| ChatAPI
+    ReportViewer -->|"POST /api/report/generate"| ReportAPI
+    BenchmarkCard -->|"POST /api/benchmark/run"| BenchmarkAPI
+
+    %% API to Agent
+    ChatAPI -->|"isDsm5Mode=true"| Agent
+    ChatAPI -->|"isDsm5Mode=false"| Gateway
+
+    %% Agent internals
+    StateMachine --> ToolOrchestrator
+    PromptBuilder --> StateMachine
+    ToolOrchestrator --> Tools
+
+    %% Tools to subsystems
+    CheckSafety --> DsmSession
+    GetNextQuestion --> DsmSession
+    ScoreResponse --> DsmItemResponse
+    Diagnose --> RAG
+    GenerateReport --> MessageTable
+
+    %% RAG flow
+    Retriever --> Embeddings
+    Embeddings --> VectorSearch
+    VectorSearch --> DsmChunk
+
+    %% Agent to LLM
+    Agent -->|"streamText()"| Gateway
+    Gateway --> OpenAI
+    Gateway --> Anthropic
+    Gateway --> Google
+
+    %% Response flow back
+    Gateway -->|"Stream"| ChatAPI
+    ChatAPI -->|"SSE Stream"| ChatComponent
+    ReportAPI --> ReportViewer
+    BenchmarkAPI --> BenchmarkCard
+```
+
+### Complete Request Flow (DSM-5 Mode)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 👤 User
+    participant UI as 🖥️ React UI
+    participant API as ⚡ /api/chat
+    participant Auth as 🔐 Auth
+    participant DB as 🗄️ Database
+    participant Agent as 🤖 Agent
+    participant Tools as 🔧 Tools
+    participant LLM as 🧠 LLM
+    participant RAG as 📚 RAG
+
+    User->>UI: Types message
+    UI->>UI: Check isDsm5Mode toggle
+    UI->>API: POST /api/chat {message, isDsm5Mode: true}
+    
+    API->>Auth: Verify session
+    Auth-->>API: User authenticated
+    
+    API->>DB: Get or create DsmSession
+    DB-->>API: Session with questionState
+    
+    API->>Agent: Build DSM-5 interviewer prompt
+    Agent->>Agent: Inject progress, current item, state
+    
+    API->>LLM: streamText() with tools
+    
+    loop Tool Execution Loop
+        LLM->>Tools: Call checkSafety(message)
+        Tools->>DB: Check risk flags
+        Tools-->>LLM: {safe: true/false}
+        
+        alt Safety Triggered
+            LLM->>API: Return escalation script
+            API->>DB: Update sessionStatus = "terminated_for_safety"
+        else Safe - Continue
+            LLM->>Tools: Call scoreResponse(itemId, response)
+            Tools->>DB: Store itemResponse with evidence
+            Tools-->>LLM: {score, ambiguity, shouldFollowUp}
+            
+            alt Need Follow-up
+                LLM->>Tools: Call getNextQuestion(isFollowUp=true)
+            else All Items Complete
+                LLM->>Tools: Call diagnose(snapshot, mode)
+                Tools->>RAG: retrieveDsmPassages(query)
+                RAG-->>Tools: Top-k DSM citations
+                Tools-->>LLM: {impressions, reasoning, citations}
+                
+                LLM->>Tools: Call generateReport(diagnosisResult)
+                Tools->>DB: Save report artifact
+            else Next Item
+                LLM->>Tools: Call getNextQuestion()
+                Tools->>DB: Get next pending item
+                Tools-->>LLM: {itemId, questionText}
+            end
+        end
+    end
+    
+    LLM-->>API: Stream response chunks
+    API-->>UI: SSE stream
+    UI->>DB: Append to transcript
+    UI-->>User: Display response
+```
+
+### Agent State Machine (Detailed)
+
+```mermaid
+stateDiagram-v2
+    [*] --> INTRO: New Session Created
+    
+    INTRO --> ASK_ITEM: User responds to intro
+    
+    ASK_ITEM --> SCORE_ITEM: Patient responds
+    ASK_ITEM --> SAFETY_STOP: Risk detected
+    
+    SCORE_ITEM --> FOLLOW_UP: ambiguity >= 7 OR score >= 2
+    SCORE_ITEM --> ASK_ITEM: Move to next item
+    SCORE_ITEM --> REPORT: All 23 items complete
+    SCORE_ITEM --> SAFETY_STOP: Risk detected
+    
+    FOLLOW_UP --> SCORE_ITEM: Patient clarifies
+    FOLLOW_UP --> SAFETY_STOP: Risk detected
+    
+    REPORT --> DONE: Report generated
+    
+    SAFETY_STOP --> [*]: Session terminated
+    DONE --> [*]: Session complete
+
+    note right of INTRO
+        - Warm greeting
+        - Explain screening purpose
+        - Describe 0-4 scale
+    end note
+    
+    note right of ASK_ITEM
+        - Select next pending item
+        - Paraphrase into natural question
+        - Track remainingCount
+    end note
+    
+    note right of SCORE_ITEM
+        - Map response to 0-4
+        - Extract evidence quotes
+        - Update ambiguity (1-10)
+    end note
+    
+    note right of FOLLOW_UP
+        - One follow-up max per item
+        - Ask for frequency/impact
+        - Record in followUpUsedItems
+    end note
+    
+    note right of REPORT
+        - Call diagnose()
+        - Retrieve DSM passages
+        - Generate streamdown report
+    end note
+    
+    note right of SAFETY_STOP
+        - Immediate termination
+        - Show escalation script
+        - No further tools allowed
+    end note
+```
+
+### Tool Execution Flow
+
+```mermaid
+flowchart TD
+    subgraph Input["📥 Patient Message"]
+        MSG[Patient Response Text]
+    end
+
+    subgraph Safety["🛡️ Safety Check (Always First)"]
+        CS[checkSafety]
+        CS -->|"Analyze for risk"| RISK{Risk Detected?}
+        RISK -->|"Yes"| STOP[🚨 SAFETY_STOP]
+        RISK -->|"No"| CONTINUE[Continue Processing]
+    end
+
+    subgraph Scoring["📊 Response Scoring"]
+        SR[scoreResponse]
+        SR --> SCORE[Score 0-4]
+        SR --> AMB[Ambiguity 1-10]
+        SR --> EV[Evidence Quotes]
+        SR --> CONF[Confidence 0-1]
+        SR --> FLAGS[Risk Flag Patch]
+    end
+
+    subgraph Decision["🔀 Next Action Decision"]
+        DEC{What Next?}
+        DEC -->|"ambiguity >= 7"| FU[Request Follow-up]
+        DEC -->|"score >= 2 & no followup yet"| FU
+        DEC -->|"items remaining"| NEXT[Get Next Question]
+        DEC -->|"all 23 complete"| DIAG[Generate Diagnosis]
+    end
+
+    subgraph NextQ["❓ Question Selection"]
+        GNQ[getNextQuestion]
+        GNQ --> ITEM[Select pending itemId]
+        GNQ --> PARA[Paraphrase question]
+        GNQ --> COUNT[Update remainingCount]
+    end
+
+    subgraph Diagnosis["🔬 Diagnostic Analysis"]
+        DIAGNOSE[diagnose]
+        RAG[retrieveDsmPassages]
+        DIAGNOSE -->|"Build query"| RAG
+        RAG -->|"Top-5 chunks"| DIAGNOSE
+        DIAGNOSE --> IMP[Impressions + Confidence]
+        DIAGNOSE --> REASON[Step-by-step Reasoning]
+        DIAGNOSE --> CITE[DSM Citations]
+    end
+
+    subgraph Report["📄 Report Generation"]
+        GR[generateReport]
+        GR --> SUM[Executive Summary]
+        GR --> TABLE[Domain Score Table]
+        GR --> APPEND[Item Appendix]
+        GR --> IMPRESS[Provisional Impressions]
+        GR --> LIM[Limitations]
+    end
+
+    MSG --> CS
+    CONTINUE --> SR
+    SR --> DEC
+    FU --> GNQ
+    NEXT --> GNQ
+    DIAG --> DIAGNOSE
+    DIAGNOSE --> GR
+    GR --> ARTIFACT[(Save Artifact)]
+```
+
+### Benchmarking Pipeline
+
+```mermaid
+flowchart TD
+    subgraph Trigger["🎯 Benchmark Trigger"]
+        BTN[Run Benchmark Button]
+        BTN --> API[POST /api/benchmark/run]
+    end
+
+    subgraph Snapshot["📸 Frozen Snapshot"]
+        API --> SNAP[Create Snapshot]
+        SNAP --> TRANS[Transcript]
+        SNAP --> ITEMS[Item Responses]
+        SNAP --> DOMAIN[Domain Summary]
+        SNAP --> REPORT[Report Content]
+        SNAP --> HASH[SHA256 Hash]
+    end
+
+    subgraph Deterministic["📐 Deterministic Metrics"]
+        DET[Compute Deterministic]
+        DET --> COV[Coverage Rate: items/23]
+        DET --> FUV[Follow-up Violations]
+        DET --> MQT[Multi-question Turns]
+        DET --> EVID[Evidence Integrity]
+        DET --> SAFE[Safety Compliance]
+    end
+
+    subgraph Text["📝 Text Metrics"]
+        TXT[Compute Text Metrics]
+        TXT --> FRE[Flesch Reading Ease]
+        TXT --> FKG[Flesch-Kincaid Grade]
+        TXT --> GFI[Gunning Fog Index]
+        TXT --> DUP[Duplication Rate]
+    end
+
+    subgraph Coherence["🔗 Coherence Metrics"]
+        COH[Compute Coherence]
+        COH --> EMB[Generate Embeddings]
+        EMB --> QA[Q/A Coherence Score]
+        EMB --> ALIGN[Report Alignment]
+    end
+
+    subgraph RAGMetrics["📚 RAG Metrics"]
+        RAGM[Compute RAG Metrics]
+        RAGM --> PREC[Context Precision]
+        RAGM --> DCOV[Domain Citation Coverage]
+        RAGM --> PHAN[Phantom Citation Rate]
+        RAGM --> GRND[Grounded Claim Rate]
+    end
+
+    subgraph Judge["⚖️ LLM Judge"]
+        JDG[Run LLM Judge]
+        JDG --> R1[Coverage: 1-5]
+        JDG --> R2[Relevance: 1-5]
+        JDG --> R3[Flow: 1-5]
+        JDG --> R4[Explainability: 1-5]
+        JDG --> R5[Empathy: 1-5]
+        JDG --> STR[Strengths Top 3]
+        JDG --> ISS[Issues Top 3]
+        JDG --> REC[Recommendations]
+    end
+
+    subgraph Compare["🔄 Model Comparison (Optional)"]
+        CMP[Run Comparison]
+        CMP --> REPLAY[Replay diagnose() per model]
+        REPLAY --> JAC[Jaccard Similarity]
+        REPLAY --> SPEAR[Spearman Correlation]
+        REPLAY --> DRIFT[Confidence Drift]
+    end
+
+    subgraph Result["📊 Benchmark Result"]
+        RES[Aggregate Results]
+        RES --> STATUS[PASS / WARN / FAIL]
+        RES --> CARD[Benchmark Report Card]
+        CARD --> UI[Display in UI]
+    end
+
+    SNAP --> DET
+    SNAP --> TXT
+    SNAP --> COH
+    SNAP --> RAGM
+    SNAP --> JDG
+    SNAP --> CMP
+    
+    DET --> RES
+    TXT --> RES
+    COH --> RES
+    RAGM --> RES
+    JDG --> RES
+    CMP --> RES
+```
+
+### Database Entity Relationships
+
+```mermaid
+erDiagram
+    User ||--o{ Chat : owns
+    Chat ||--o{ Message : contains
+    Chat ||--o| DsmSession : has
+    Chat ||--o{ Document : has
+    Chat ||--o{ BenchmarkSnapshot : has
+    
+    DsmSession ||--o{ DsmItemResponse : contains
+    
+    DsmSource ||--o{ DsmChunk : contains
+    
+    BenchmarkSnapshot ||--o{ BenchmarkRun : triggers
+    
+    User {
+        uuid id PK
+        varchar email
+        varchar password
+    }
+    
+    Chat {
+        uuid id PK
+        uuid userId FK
+        text title
+        timestamp createdAt
+        varchar visibility
+    }
+    
+    Message {
+        uuid id PK
+        uuid chatId FK
+        varchar role
+        json parts
+        json attachments
+        timestamp createdAt
+    }
+    
+    DsmSession {
+        uuid id PK
+        uuid chatId FK
+        varchar sessionStatus
+        varchar diagnosticMode
+        json transcript
+        json symptomSummary
+        json riskFlags
+        json questionState
+        json sessionMeta
+        timestamp completedAt
+    }
+    
+    DsmItemResponse {
+        uuid id PK
+        uuid sessionId FK
+        varchar itemId
+        int score
+        int ambiguity
+        json evidenceQuotes
+        json evidence
+        real confidence
+    }
+    
+    DsmSource {
+        uuid id PK
+        text name
+        text version
+        text checksum
+        varchar status
+        int totalChunks
+    }
+    
+    DsmChunk {
+        uuid id PK
+        uuid sourceId FK
+        int chunkIndex
+        text content
+        vector embedding
+        int page
+        text sectionPath
+        int tokenCount
+    }
+    
+    Document {
+        uuid id PK
+        uuid userId FK
+        uuid chatId FK
+        text title
+        text content
+        varchar kind
+    }
+    
+    BenchmarkSnapshot {
+        uuid id PK
+        uuid chatId FK
+        text hash
+        json payload
+    }
+    
+    BenchmarkRun {
+        uuid id PK
+        uuid chatId FK
+        uuid snapshotId FK
+        json config
+        varchar status
+        json metricsDeterministic
+        json metricsText
+        json metricsRag
+        json judgeResult
+        json comparisons
+    }
+```
+
+### RAG Ingestion & Retrieval Pipeline
+
+```mermaid
+flowchart LR
+    subgraph Ingestion["📥 Ingestion (Admin)"]
+        PDF[DSM-5 PDF]
+        PDF -->|"pdf-parse"| EXTRACT[Extract Text]
+        EXTRACT -->|"Chunk ~1024 tokens"| CHUNKS[Text Chunks]
+        CHUNKS -->|"text-embedding-3-small"| EMBED[Generate Embeddings]
+        EMBED -->|"Batch insert"| STORE[(DsmChunk Table)]
+    end
+
+    subgraph Runtime["🔍 Runtime Retrieval"]
+        QUERY[Query from diagnose]
+        QUERY -->|"Build query text"| QEMBED[Embed Query]
+        QEMBED -->|"Cosine similarity"| SEARCH[pgvector Search]
+        SEARCH -->|"Top-k=5"| RESULTS[Retrieved Chunks]
+        RESULTS -->|"Format citations"| CITE[DSM Citations]
+    end
+
+    subgraph Storage["🗄️ PostgreSQL + pgvector"]
+        STORE
+        SEARCH --> STORE
+        INDEX[IVFFlat Index]
+        STORE --- INDEX
+    end
+
+    CITE -->|"Inject into prompt"| DIAG[Diagnostician LLM]
+```
+
+---
+
 ## Agent Architecture
 
 ### State Machine
