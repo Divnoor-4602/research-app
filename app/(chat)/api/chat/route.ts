@@ -85,6 +85,8 @@ export async function POST(request: Request) {
       ragMode,
     } = requestBody;
 
+    console.log("[DEBUG] API /chat received - isDsm5Mode:", isDsm5Mode, "ragMode:", ragMode, "chatId:", id);
+
     const session = await auth();
 
     if (!session?.user) {
@@ -126,6 +128,7 @@ export async function POST(request: Request) {
 
       // Create DSM-5 session for new chats when DSM-5 mode is enabled
       if (isDsm5Mode) {
+        console.log("[DEBUG] Creating new DSM-5 session for new chat:", id);
         await createDsmSession({
           chatId: id,
           diagnosticMode: "diagnostic",
@@ -137,6 +140,25 @@ export async function POST(request: Request) {
           questionState: getDefaultQuestionState(),
           riskFlags: defaultRiskFlags,
         });
+      }
+    } else {
+      // Existing chat - create DSM-5 session if mode is enabled but session doesn't exist
+      if (isDsm5Mode) {
+        const existingDsmSession = await getDsmSessionByChatId({ chatId: id });
+        if (!existingDsmSession) {
+          console.log("[DEBUG] Creating DSM-5 session for existing chat:", id);
+          await createDsmSession({
+            chatId: id,
+            diagnosticMode: "diagnostic",
+            sessionMeta: {
+              sessionId: id,
+              modelVersion: selectedChatModel,
+              promptVersion: "1.0.0",
+            },
+            questionState: getDefaultQuestionState(),
+            riskFlags: defaultRiskFlags,
+          });
+        }
       }
     }
 
@@ -194,6 +216,7 @@ export async function POST(request: Request) {
     let finalSystemPrompt: string;
     if (isDsm5Mode) {
       const dsmSession = await getDsmSessionByChatId({ chatId: id });
+      console.log("[DEBUG] isDsm5Mode=true, dsmSession exists:", !!dsmSession, "chatId:", id);
       if (dsmSession) {
         const questionState = dsmSession.questionState as QuestionState;
         const progress = getInterviewProgress(
@@ -203,6 +226,8 @@ export async function POST(request: Request) {
         const currentItem = questionState.currentItemId
           ? (getItemById(questionState.currentItemId) ?? null)
           : null;
+
+        console.log("[DEBUG] Using DSM-5 interviewer prompt, state:", questionState.currentState, "progress:", progress.completedItems, "/", progress.totalItems);
 
         finalSystemPrompt = getDsm5InterviewerPrompt({
           stateContext: {
@@ -216,9 +241,11 @@ export async function POST(request: Request) {
         });
       } else {
         // Fallback to regular prompt if no DSM session exists
+        console.log("[DEBUG] No DSM session found, falling back to regular prompt");
         finalSystemPrompt = systemPrompt({ selectedChatModel, requestHints });
       }
     } else {
+      console.log("[DEBUG] isDsm5Mode=false, using regular prompt");
       finalSystemPrompt = systemPrompt({ selectedChatModel, requestHints });
     }
 

@@ -77,6 +77,7 @@ export function Chat({
 
   // DSM-5 mode state - persisted in localStorage
   const [isDsm5Mode, setIsDsm5Mode] = useLocalStorage<boolean>("dsm5-mode", false);
+  const isDsm5ModeRef = useRef(isDsm5Mode);
 
   // RAG mode state - persisted in localStorage
   const [ragMode, setRagMode] = useLocalStorage<RagMode>("rag-mode", "off");
@@ -85,6 +86,10 @@ export function Chat({
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
+
+  useEffect(() => {
+    isDsm5ModeRef.current = isDsm5Mode;
+  }, [isDsm5Mode]);
 
   useEffect(() => {
     ragModeRef.current = ragMode;
@@ -131,6 +136,11 @@ export function Chat({
             })
           );
 
+        const dsm5ModeValue = isDsm5ModeRef.current;
+        const ragModeValue = ragModeRef.current;
+        
+        console.log("[DEBUG] prepareSendMessagesRequest - isDsm5Mode:", dsm5ModeValue, "ragMode:", ragModeValue);
+
         return {
           body: {
             id: request.id,
@@ -139,7 +149,8 @@ export function Chat({
               : { message: lastMessage }),
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
-            ragMode: ragModeRef.current,
+            isDsm5Mode: dsm5ModeValue,
+            ragMode: ragModeValue,
             ...request.body,
           },
         };
