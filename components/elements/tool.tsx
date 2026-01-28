@@ -65,6 +65,26 @@ const getStatusBadge = (status: ToolUIPart["state"]) => {
   );
 };
 
+const getToolDisplayName = (type: ToolUIPart["type"]): string => {
+  const toolNames: Record<string, string> = {
+    "tool-checkSafety": "Safety Check",
+    "tool-diagnose": "Diagnostic Analysis",
+    "tool-generateReport": "Generate Report",
+    "tool-getNextQuestion": "Get Next Question",
+    "tool-scoreResponse": "Score Response",
+    "tool-markItemComplete": "Mark Complete",
+    "tool-requestFollowUp": "Request Follow-Up",
+  };
+
+  return (
+    toolNames[type] ??
+    type
+      .replace("tool-", "")
+      .replace(/([A-Z])/g, " $1")
+      .trim()
+  );
+};
+
 export const ToolHeader = ({
   className,
   type,
@@ -80,7 +100,9 @@ export const ToolHeader = ({
   >
     <div className="flex min-w-0 flex-1 items-center gap-2">
       <WrenchIcon className="size-4 shrink-0 text-muted-foreground" />
-      <span className="truncate font-medium text-sm">{type}</span>
+      <span className="truncate font-medium text-sm">
+        {getToolDisplayName(type)}
+      </span>
     </div>
     <div className="flex shrink-0 items-center gap-2">
       {getStatusBadge(state)}

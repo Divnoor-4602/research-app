@@ -5,6 +5,7 @@ import { DefaultChatTransport } from "ai";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
+import { useLocalStorage } from "usehooks-ts";
 import { unstable_serialize } from "swr/infinite";
 import { ChatHeader } from "@/components/chat-header";
 import {
@@ -21,6 +22,7 @@ import { useArtifactSelector } from "@/hooks/use-artifact";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { useChatVisibility } from "@/hooks/use-chat-visibility";
 import type { Vote } from "@/lib/db/schema";
+import type { RagMode } from "@/lib/dsm5/schemas";
 import { ChatSDKError } from "@/lib/errors";
 import type { Attachment, ChatMessage } from "@/lib/types";
 import { fetcher, fetchWithErrorHandlers, generateUUID } from "@/lib/utils";
@@ -73,9 +75,20 @@ export function Chat({
   const [currentModelId, setCurrentModelId] = useState(initialChatModel);
   const currentModelIdRef = useRef(currentModelId);
 
+  // DSM-5 mode state - persisted in localStorage
+  const [isDsm5Mode, setIsDsm5Mode] = useLocalStorage<boolean>("dsm5-mode", false);
+
+  // RAG mode state - persisted in localStorage
+  const [ragMode, setRagMode] = useLocalStorage<RagMode>("rag-mode", "off");
+  const ragModeRef = useRef(ragMode);
+
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
+
+  useEffect(() => {
+    ragModeRef.current = ragMode;
+  }, [ragMode]);
 
   const {
     messages,
@@ -126,12 +139,14 @@ export function Chat({
               : { message: lastMessage }),
             selectedChatModel: currentModelIdRef.current,
             selectedVisibilityType: visibilityType,
+            ragMode: ragModeRef.current,
             ...request.body,
           },
         };
       },
     }),
     onData: (dataPart) => {
+      console.log("[DEBUG] onData received:", dataPart.type, dataPart);
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
     },
     onFinish: () => {
@@ -191,6 +206,7 @@ export function Chat({
         <ChatHeader
           chatId={id}
           isReadonly={isReadonly}
+          ragMode={ragMode}
           selectedVisibilityType={initialVisibilityType}
         />
 
@@ -213,8 +229,12 @@ export function Chat({
               attachments={attachments}
               chatId={id}
               input={input}
+              isDsm5Mode={isDsm5Mode}
               messages={messages}
+              onDsm5ModeChange={setIsDsm5Mode}
               onModelChange={setCurrentModelId}
+              onRagModeChange={setRagMode}
+              ragMode={ragMode}
               selectedModelId={currentModelId}
               selectedVisibilityType={visibilityType}
               sendMessage={sendMessage}

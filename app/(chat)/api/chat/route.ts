@@ -13,15 +13,23 @@ import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
-import { createDocument } from "@/lib/ai/tools/create-document";
-import { getWeather } from "@/lib/ai/tools/get-weather";
-import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
-import { updateDocument } from "@/lib/ai/tools/update-document";
+import {
+  checkSafety,
+  diagnose,
+  generateReport,
+  getNextQuestion,
+  markItemComplete,
+  requestFollowUp,
+  scoreResponse,
+} from "@/lib/ai/tools/dsm5";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
+  appendToTranscript,
+  createDsmSession,
   createStreamId,
   deleteChatById,
   getChatById,
+  getDsmSessionByChatId,
   getMessageCountByUserId,
   getMessagesByChatId,
   saveChat,
@@ -30,6 +38,14 @@ import {
   updateMessage,
 } from "@/lib/db/queries";
 import type { DBMessage } from "@/lib/db/schema";
+import { getInterviewProgress } from "@/lib/dsm5/item-selector";
+import { getDefaultQuestionState, getItemById } from "@/lib/dsm5/items";
+import { getDsm5InterviewerPrompt } from "@/lib/dsm5/prompts";
+import {
+  defaultRiskFlags,
+  type QuestionState,
+  type TranscriptEntry,
+} from "@/lib/dsm5/schemas";
 import { ChatSDKError } from "@/lib/errors";
 import type { ChatMessage } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
@@ -59,8 +75,15 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { id, message, messages, selectedChatModel, selectedVisibilityType } =
-      requestBody;
+    const {
+      id,
+      message,
+      messages,
+      selectedChatModel,
+      selectedVisibilityType,
+      isDsm5Mode,
+      ragMode,
+    } = requestBody;
 
     const session = await auth();
 
@@ -100,6 +123,21 @@ export async function POST(request: Request) {
         visibility: selectedVisibilityType,
       });
       titlePromise = generateTitleFromUserMessage({ message });
+
+      // Create DSM-5 session for new chats when DSM-5 mode is enabled
+      if (isDsm5Mode) {
+        await createDsmSession({
+          chatId: id,
+          diagnosticMode: "diagnostic",
+          sessionMeta: {
+            sessionId: id,
+            modelVersion: selectedChatModel,
+            promptVersion: "1.0.0",
+          },
+          questionState: getDefaultQuestionState(),
+          riskFlags: defaultRiskFlags,
+        });
+      }
     }
 
     const uiMessages = isToolApprovalFlow
@@ -128,6 +166,22 @@ export async function POST(request: Request) {
           },
         ],
       });
+
+      // Append user message to DSM-5 transcript if in DSM-5 mode
+      if (isDsm5Mode) {
+        const dsmSession = await getDsmSessionByChatId({ chatId: id });
+        if (dsmSession) {
+          const textParts = message.parts.filter(
+            (p): p is { type: "text"; text: string } => p.type === "text"
+          );
+          const transcriptEntry: TranscriptEntry = {
+            role: "patient",
+            text: textParts.map((p) => p.text).join("\n"),
+            timestamp: new Date().toISOString(),
+          };
+          await appendToTranscript({ chatId: id, entry: transcriptEntry });
+        }
+      }
     }
 
     const isReasoningModel =
@@ -136,22 +190,104 @@ export async function POST(request: Request) {
 
     const modelMessages = await convertToModelMessages(uiMessages);
 
+    // Build system prompt - use DSM-5 interviewer prompt when in DSM-5 mode
+    let finalSystemPrompt: string;
+    if (isDsm5Mode) {
+      const dsmSession = await getDsmSessionByChatId({ chatId: id });
+      if (dsmSession) {
+        const questionState = dsmSession.questionState as QuestionState;
+        const progress = getInterviewProgress(
+          questionState.pendingItems,
+          questionState.completedItems
+        );
+        const currentItem = questionState.currentItemId
+          ? (getItemById(questionState.currentItemId) ?? null)
+          : null;
+
+        finalSystemPrompt = getDsm5InterviewerPrompt({
+          stateContext: {
+            currentState: questionState.currentState ?? "INTRO",
+            currentItemId: questionState.currentItemId ?? null,
+            isFollowUp: questionState.isFollowUp ?? false,
+            followUpUsedItems: questionState.followUpUsedItems ?? [],
+          },
+          progress,
+          currentItem,
+        });
+      } else {
+        // Fallback to regular prompt if no DSM session exists
+        finalSystemPrompt = systemPrompt({ selectedChatModel, requestHints });
+      }
+    } else {
+      finalSystemPrompt = systemPrompt({ selectedChatModel, requestHints });
+    }
+
+    // Define DSM-5 tools
+    type Dsm5ToolNames =
+      | "checkSafety"
+      | "diagnose"
+      | "generateReport"
+      | "getNextQuestion"
+      | "markItemComplete"
+      | "requestFollowUp"
+      | "scoreResponse";
+
+    // Check if session is in SAFETY_STOP state
+    const isInSafetyStop =
+      isDsm5Mode &&
+      (await getDsmSessionByChatId({ chatId: id }))?.questionState &&
+      (
+        (await getDsmSessionByChatId({ chatId: id }))
+          ?.questionState as QuestionState
+      ).currentState === "SAFETY_STOP";
+
+    // Only enable tools in DSM-5 mode
+    // If in SAFETY_STOP, only allow checkSafety (for session state check) but no screening tools
+    const activeTools: Dsm5ToolNames[] = isDsm5Mode
+      ? isInSafetyStop
+        ? [] // No tools in safety stop - supportive chat only
+        : [
+            "checkSafety",
+            "diagnose",
+            "generateReport",
+            "getNextQuestion",
+            "markItemComplete",
+            "requestFollowUp",
+            "scoreResponse",
+          ]
+      : [];
+
     const stream = createUIMessageStream({
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
       execute: async ({ writer: dataStream }) => {
+        // DSM-5 tools
+        const dsm5Tools = {
+          checkSafety: checkSafety({ chatId: id, modelId: selectedChatModel }),
+          diagnose: diagnose({
+            chatId: id,
+            modelId: selectedChatModel,
+            ragMode,
+          }),
+          generateReport: generateReport({
+            chatId: id,
+            userId: session.user.id,
+            dataStream,
+          }),
+          getNextQuestion: getNextQuestion({ chatId: id }),
+          markItemComplete: markItemComplete({ chatId: id }),
+          requestFollowUp: requestFollowUp({ chatId: id }),
+          scoreResponse: scoreResponse({
+            chatId: id,
+            modelId: selectedChatModel,
+          }),
+        };
+
         const result = streamText({
           model: getLanguageModel(selectedChatModel),
-          system: systemPrompt({ selectedChatModel, requestHints }),
+          system: finalSystemPrompt,
           messages: modelMessages,
           stopWhen: stepCountIs(5),
-          experimental_activeTools: isReasoningModel
-            ? []
-            : [
-                "getWeather",
-                "createDocument",
-                "updateDocument",
-                "requestSuggestions",
-              ],
+          experimental_activeTools: activeTools,
           providerOptions: isReasoningModel
             ? {
                 anthropic: {
@@ -159,15 +295,10 @@ export async function POST(request: Request) {
                 },
               }
             : undefined,
-          tools: {
-            getWeather,
-            createDocument: createDocument({ session, dataStream }),
-            updateDocument: updateDocument({ session, dataStream }),
-            requestSuggestions: requestSuggestions({ session, dataStream }),
-          },
+          tools: dsm5Tools,
           experimental_telemetry: {
             isEnabled: isProductionEnvironment,
-            functionId: "stream-text",
+            functionId: isDsm5Mode ? "dsm5-interview" : "stream-text",
           },
         });
 
@@ -215,6 +346,36 @@ export async function POST(request: Request) {
               chatId: id,
             })),
           });
+        }
+
+        // Append assistant messages to DSM-5 transcript if in DSM-5 mode
+        if (isDsm5Mode && finishedMessages.length > 0) {
+          const dsmSession = await getDsmSessionByChatId({ chatId: id });
+          if (dsmSession) {
+            for (const finishedMsg of finishedMessages) {
+              if (finishedMsg.role === "assistant") {
+                const textParts =
+                  finishedMsg.parts?.filter(
+                    (p): p is { type: "text"; text: string } =>
+                      typeof p === "object" &&
+                      p !== null &&
+                      "type" in p &&
+                      p.type === "text"
+                  ) ?? [];
+                if (textParts.length > 0) {
+                  const transcriptEntry: TranscriptEntry = {
+                    role: "interviewer",
+                    text: textParts.map((p) => p.text).join("\n"),
+                    timestamp: new Date().toISOString(),
+                  };
+                  await appendToTranscript({
+                    chatId: id,
+                    entry: transcriptEntry,
+                  });
+                }
+              }
+            }
+          }
         }
       },
       onError: () => "Oops, an error occurred!",

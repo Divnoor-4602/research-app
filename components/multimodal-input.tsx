@@ -34,6 +34,7 @@ import {
 } from "@/lib/ai/models";
 import type { Attachment, ChatMessage } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { Dsm5ModeToggle } from "./dsm5-mode-toggle";
 import {
   PromptInput,
   PromptInputSubmit,
@@ -43,6 +44,7 @@ import {
 } from "./elements/prompt-input";
 import { ArrowUpIcon, PaperclipIcon, StopIcon } from "./icons";
 import { PreviewAttachment } from "./preview-attachment";
+import { RagModeToggle } from "./rag-mode-toggle";
 import { SuggestedActions } from "./suggested-actions";
 import { Button } from "./ui/button";
 import type { VisibilityType } from "./visibility-selector";
@@ -68,6 +70,10 @@ function PureMultimodalInput({
   selectedVisibilityType,
   selectedModelId,
   onModelChange,
+  isDsm5Mode,
+  onDsm5ModeChange,
+  ragMode,
+  onRagModeChange,
 }: {
   chatId: string;
   input: string;
@@ -83,7 +89,12 @@ function PureMultimodalInput({
   selectedVisibilityType: VisibilityType;
   selectedModelId: string;
   onModelChange?: (modelId: string) => void;
+  isDsm5Mode?: boolean;
+  onDsm5ModeChange?: (enabled: boolean) => void;
+  ragMode?: "off" | "citations" | "grounded";
+  onRagModeChange?: (mode: "off" | "citations" | "grounded") => void;
 }) {
+  const dsm5ModeEnabled = isDsm5Mode ?? false;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { width } = useWindowSize();
 
@@ -223,10 +234,13 @@ function PureMultimodalInput({
           (attachment) => attachment !== undefined
         );
 
-        setAttachments((currentAttachments) => [
-          ...currentAttachments,
-          ...successfullyUploadedAttachments,
-        ]);
+        setAttachments(
+          (currentAttachments) =>
+            [
+              ...currentAttachments,
+              ...successfullyUploadedAttachments,
+            ] as Attachment[]
+        );
       } catch (error) {
         console.error("Error uploading files!", error);
       } finally {
@@ -371,7 +385,11 @@ function PureMultimodalInput({
             maxHeight={200}
             minHeight={44}
             onChange={handleInput}
-            placeholder="Send a message..."
+            placeholder={
+              dsm5ModeEnabled
+                ? "DSM-5 Screening Mode active. Send a message to begin..."
+                : "Send a message..."
+            }
             ref={textareaRef}
             rows={1}
             value={input}
@@ -388,6 +406,23 @@ function PureMultimodalInput({
               onModelChange={onModelChange}
               selectedModelId={selectedModelId}
             />
+            <Dsm5ModeToggle
+              disabled={status !== "ready"}
+              isEnabled={dsm5ModeEnabled}
+              onToggle={(enabled) => {
+                onDsm5ModeChange?.(enabled);
+                setCookie("dsm5-mode", String(enabled));
+              }}
+            />
+            {dsm5ModeEnabled && (
+              <RagModeToggle
+                disabled={false}
+                onRagModeChange={(mode) => {
+                  onRagModeChange?.(mode);
+                }}
+                ragMode={ragMode ?? "off"}
+              />
+            )}
           </PromptInputTools>
 
           {status === "submitted" ? (
@@ -424,6 +459,12 @@ export const MultimodalInput = memo(
       return false;
     }
     if (prevProps.selectedModelId !== nextProps.selectedModelId) {
+      return false;
+    }
+    if (prevProps.isDsm5Mode !== nextProps.isDsm5Mode) {
+      return false;
+    }
+    if (prevProps.ragMode !== nextProps.ragMode) {
       return false;
     }
 

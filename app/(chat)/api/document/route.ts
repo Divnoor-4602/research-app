@@ -2,6 +2,7 @@ import { auth } from "@/app/(auth)/auth";
 import type { ArtifactKind } from "@/components/artifact";
 import {
   deleteDocumentsByIdAfterTimestamp,
+  getDocumentsByChatId,
   getDocumentsById,
   saveDocument,
 } from "@/lib/db/queries";
@@ -10,18 +11,30 @@ import { ChatSDKError } from "@/lib/errors";
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id");
-
-  if (!id) {
-    return new ChatSDKError(
-      "bad_request:api",
-      "Parameter id is missing"
-    ).toResponse();
-  }
+  const chatId = searchParams.get("chatId");
+  const kind = searchParams.get("kind");
 
   const session = await auth();
 
   if (!session?.user) {
     return new ChatSDKError("unauthorized:document").toResponse();
+  }
+
+  // Query by chatId (for sidebar report links)
+  if (chatId) {
+    const documents = await getDocumentsByChatId({
+      chatId,
+      kind: kind ?? undefined,
+    });
+    return Response.json(documents, { status: 200 });
+  }
+
+  // Query by document id
+  if (!id) {
+    return new ChatSDKError(
+      "bad_request:api",
+      "Parameter id or chatId is required"
+    ).toResponse();
   }
 
   const documents = await getDocumentsById({ id });

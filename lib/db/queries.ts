@@ -16,13 +16,38 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import type { ArtifactKind } from "@/components/artifact";
 import type { VisibilityType } from "@/components/visibility-selector";
+import type {
+  BenchmarkConfig,
+  DeterministicMetrics,
+  JudgeResult,
+  ModelComparison,
+  RagMetrics,
+  Snapshot,
+  TextMetrics,
+} from "@/lib/dsm5/benchmark-schemas";
+import type {
+  DiagnosticMode,
+  QuestionState,
+  RiskFlags,
+  SessionMeta,
+  SymptomDomain,
+  TranscriptEntry,
+} from "@/lib/dsm5/schemas";
 import { ChatSDKError } from "../errors";
 import { generateUUID } from "../utils";
 import {
+  benchmarkRun,
+  type BenchmarkRun,
+  benchmarkSnapshot,
+  type BenchmarkSnapshot,
   type Chat,
   chat,
   type DBMessage,
+  type DsmItemResponse,
+  type DsmSession,
   document,
+  dsmItemResponse,
+  dsmSession,
   message,
   type Suggestion,
   stream,
@@ -327,12 +352,14 @@ export async function saveDocument({
   kind,
   content,
   userId,
+  chatId,
 }: {
   id: string;
   title: string;
   kind: ArtifactKind;
   content: string;
   userId: string;
+  chatId?: string;
 }) {
   try {
     return await db
@@ -343,6 +370,7 @@ export async function saveDocument({
         kind,
         content,
         userId,
+        chatId,
         createdAt: new Date(),
       })
       .returning();
@@ -381,6 +409,39 @@ export async function getDocumentById({ id }: { id: string }) {
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to get document by id"
+    );
+  }
+}
+
+export async function getDocumentsByChatId({
+  chatId,
+  kind,
+}: {
+  chatId: string;
+  kind?: string;
+}) {
+  try {
+    const conditions = [eq(document.chatId, chatId)];
+    if (kind) {
+      conditions.push(eq(document.kind, kind as ArtifactKind));
+    }
+
+    const documents = await db
+      .select({
+        id: document.id,
+        title: document.title,
+        kind: document.kind,
+        createdAt: document.createdAt,
+      })
+      .from(document)
+      .where(and(...conditions))
+      .orderBy(desc(document.createdAt));
+
+    return documents;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get documents by chat id"
     );
   }
 }
@@ -597,6 +658,692 @@ export async function getStreamIdsByChatId({ chatId }: { chatId: string }) {
     throw new ChatSDKError(
       "bad_request:database",
       "Failed to get stream ids by chat id"
+    );
+  }
+}
+
+// ============================================================================
+// DSM-5 Session Functions
+// ============================================================================
+
+export async function createDsmSession({
+  chatId,
+  diagnosticMode = "diagnostic",
+  sessionMeta,
+  questionState,
+  riskFlags,
+}: {
+  chatId: string;
+  diagnosticMode?: DiagnosticMode;
+  sessionMeta: SessionMeta;
+  questionState: QuestionState;
+  riskFlags: RiskFlags;
+}): Promise<DsmSession> {
+  try {
+    const [session] = await db
+      .insert(dsmSession)
+      .values({
+        chatId,
+        diagnosticMode,
+        sessionMeta,
+        questionState,
+        riskFlags,
+        transcript: [],
+        symptomSummary: [],
+      })
+      .returning();
+
+    return session;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to create DSM session"
+    );
+  }
+}
+
+export async function getDsmSessionByChatId({
+  chatId,
+}: {
+  chatId: string;
+}): Promise<DsmSession | null> {
+  try {
+    const [session] = await db
+      .select()
+      .from(dsmSession)
+      .where(eq(dsmSession.chatId, chatId));
+
+    return session ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get DSM session by chat id"
+    );
+  }
+}
+
+export async function getDsmSessionById({
+  id,
+}: {
+  id: string;
+}): Promise<DsmSession | null> {
+  try {
+    const [session] = await db
+      .select()
+      .from(dsmSession)
+      .where(eq(dsmSession.id, id));
+
+    return session ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get DSM session by id"
+    );
+  }
+}
+
+export async function updateDsmSession({
+  chatId,
+  patch,
+}: {
+  chatId: string;
+  patch: {
+    sessionStatus?: "active" | "completed" | "terminated_for_safety";
+    diagnosticMode?: DiagnosticMode;
+    transcript?: TranscriptEntry[];
+    symptomSummary?: SymptomDomain[];
+    riskFlags?: RiskFlags;
+    questionState?: QuestionState;
+    completedAt?: Date;
+  };
+}): Promise<DsmSession | null> {
+  try {
+    const updateData: Record<string, unknown> = {
+      updatedAt: new Date(),
+    };
+
+    if (patch.sessionStatus !== undefined) {
+      updateData.sessionStatus = patch.sessionStatus;
+    }
+    if (patch.diagnosticMode !== undefined) {
+      updateData.diagnosticMode = patch.diagnosticMode;
+    }
+    if (patch.transcript !== undefined) {
+      updateData.transcript = patch.transcript;
+    }
+    if (patch.symptomSummary !== undefined) {
+      updateData.symptomSummary = patch.symptomSummary;
+    }
+    if (patch.riskFlags !== undefined) {
+      updateData.riskFlags = patch.riskFlags;
+    }
+    if (patch.questionState !== undefined) {
+      updateData.questionState = patch.questionState;
+    }
+    if (patch.completedAt !== undefined) {
+      updateData.completedAt = patch.completedAt;
+    }
+
+    const [updated] = await db
+      .update(dsmSession)
+      .set(updateData)
+      .where(eq(dsmSession.chatId, chatId))
+      .returning();
+
+    return updated ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to update DSM session"
+    );
+  }
+}
+
+export async function appendToTranscript({
+  chatId,
+  entry,
+}: {
+  chatId: string;
+  entry: TranscriptEntry;
+}): Promise<DsmSession | null> {
+  try {
+    // Get current session to append to transcript
+    const session = await getDsmSessionByChatId({ chatId });
+    if (!session) {
+      return null;
+    }
+
+    const currentTranscript = (session.transcript as TranscriptEntry[]) || [];
+    const newTranscript = [...currentTranscript, entry];
+
+    const [updated] = await db
+      .update(dsmSession)
+      .set({
+        transcript: newTranscript,
+        updatedAt: new Date(),
+      })
+      .where(eq(dsmSession.chatId, chatId))
+      .returning();
+
+    return updated ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to append to transcript"
+    );
+  }
+}
+
+export async function upsertItemResponse({
+  sessionId,
+  itemId,
+  score,
+  ambiguity,
+  evidenceQuotes,
+  evidence,
+  confidence,
+}: {
+  sessionId: string;
+  itemId: string;
+  score: number;
+  ambiguity: number;
+  evidenceQuotes: string[];
+  evidence?: {
+    type: "direct_span" | "inferred" | "none";
+    messageIndex: number;
+    spans: Array<{ start: number; end: number }>;
+    strength: number;
+    summary?: string;
+  };
+  confidence?: number;
+}): Promise<DsmItemResponse> {
+  try {
+    // Check if response exists
+    const [existing] = await db
+      .select()
+      .from(dsmItemResponse)
+      .where(
+        and(
+          eq(dsmItemResponse.sessionId, sessionId),
+          eq(dsmItemResponse.itemId, itemId)
+        )
+      );
+
+    if (existing) {
+      // Update existing response
+      const [updated] = await db
+        .update(dsmItemResponse)
+        .set({
+          score,
+          ambiguity,
+          evidenceQuotes,
+          evidence,
+          confidence: confidence ?? null,
+        })
+        .where(eq(dsmItemResponse.id, existing.id))
+        .returning();
+
+      return updated;
+    }
+
+    // Create new response
+    const [created] = await db
+      .insert(dsmItemResponse)
+      .values({
+        sessionId,
+        itemId,
+        score,
+        ambiguity,
+        evidenceQuotes,
+        evidence,
+        confidence: confidence ?? null,
+      })
+      .returning();
+
+    return created;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to upsert item response"
+    );
+  }
+}
+
+export async function getItemResponsesBySessionId({
+  sessionId,
+}: {
+  sessionId: string;
+}): Promise<DsmItemResponse[]> {
+  try {
+    return await db
+      .select()
+      .from(dsmItemResponse)
+      .where(eq(dsmItemResponse.sessionId, sessionId))
+      .orderBy(asc(dsmItemResponse.createdAt));
+  } catch (error) {
+    console.error("getItemResponsesBySessionId error:", error);
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get item responses by session id"
+    );
+  }
+}
+
+export async function deleteDsmSessionByChatId({
+  chatId,
+}: {
+  chatId: string;
+}): Promise<void> {
+  try {
+    // Item responses will be cascaded due to foreign key constraint
+    await db.delete(dsmSession).where(eq(dsmSession.chatId, chatId));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to delete DSM session"
+    );
+  }
+}
+
+// ============================================================================
+// Question State Management Functions
+// ============================================================================
+
+export async function markItemAsCompleted({
+  chatId,
+  itemId,
+}: {
+  chatId: string;
+  itemId: string;
+}): Promise<DsmSession | null> {
+  try {
+    const session = await getDsmSessionByChatId({ chatId });
+    if (!session) {
+      return null;
+    }
+
+    const questionState = session.questionState as QuestionState;
+
+    // Remove from pending, add to completed
+    const updatedPending = questionState.pendingItems.filter(
+      (id) => id !== itemId
+    );
+    const updatedCompleted = questionState.completedItems.includes(itemId)
+      ? questionState.completedItems
+      : [...questionState.completedItems, itemId];
+
+    const updatedQuestionState: QuestionState = {
+      ...questionState,
+      pendingItems: updatedPending,
+      completedItems: updatedCompleted,
+    };
+
+    return await updateDsmSession({
+      chatId,
+      patch: { questionState: updatedQuestionState },
+    });
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to mark item as completed"
+    );
+  }
+}
+
+export async function markFollowUpUsed({
+  chatId,
+  itemId,
+}: {
+  chatId: string;
+  itemId: string;
+}): Promise<DsmSession | null> {
+  try {
+    const session = await getDsmSessionByChatId({ chatId });
+    if (!session) {
+      return null;
+    }
+
+    const questionState = session.questionState as QuestionState;
+    const followUpUsedItems = questionState.followUpUsedItems ?? [];
+
+    if (followUpUsedItems.includes(itemId)) {
+      return session; // Already marked
+    }
+
+    const updatedQuestionState: QuestionState = {
+      ...questionState,
+      followUpUsedItems: [...followUpUsedItems, itemId],
+    };
+
+    return await updateDsmSession({
+      chatId,
+      patch: { questionState: updatedQuestionState },
+    });
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to mark follow-up as used"
+    );
+  }
+}
+
+export async function updateAgentState({
+  chatId,
+  state,
+  currentItemId,
+  isFollowUp,
+}: {
+  chatId: string;
+  state: string;
+  currentItemId?: string | null;
+  isFollowUp?: boolean;
+}): Promise<DsmSession | null> {
+  try {
+    const session = await getDsmSessionByChatId({ chatId });
+    if (!session) {
+      return null;
+    }
+
+    const questionState = session.questionState as QuestionState;
+
+    const updatedQuestionState: QuestionState = {
+      ...questionState,
+      currentState: state as QuestionState["currentState"],
+      ...(currentItemId !== undefined && { currentItemId }),
+      ...(isFollowUp !== undefined && { isFollowUp }),
+    };
+
+    return await updateDsmSession({
+      chatId,
+      patch: { questionState: updatedQuestionState },
+    });
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to update agent state"
+    );
+  }
+}
+
+export async function triggerSafetyStop({
+  chatId,
+}: {
+  chatId: string;
+}): Promise<DsmSession | null> {
+  try {
+    const session = await getDsmSessionByChatId({ chatId });
+    if (!session) {
+      return null;
+    }
+
+    const questionState = session.questionState as QuestionState;
+
+    const updatedQuestionState: QuestionState = {
+      ...questionState,
+      currentState: "SAFETY_STOP",
+    };
+
+    return await updateDsmSession({
+      chatId,
+      patch: {
+        questionState: updatedQuestionState,
+        sessionStatus: "terminated_for_safety",
+      },
+    });
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to trigger safety stop"
+    );
+  }
+}
+
+export async function getItemScoresBySessionId({
+  sessionId,
+}: {
+  sessionId: string;
+}): Promise<Map<string, number>> {
+  try {
+    const responses = await getItemResponsesBySessionId({ sessionId });
+    const scoreMap = new Map<string, number>();
+
+    for (const response of responses) {
+      scoreMap.set(response.itemId, response.score);
+    }
+
+    return scoreMap;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get item scores by session id"
+    );
+  }
+}
+
+// ============================================================================
+// Benchmark Snapshot Queries
+// ============================================================================
+
+/**
+ * Creates a new benchmark snapshot with SHA256 hash for integrity verification
+ */
+export async function createBenchmarkSnapshot({
+  chatId,
+  payload,
+  hash,
+}: {
+  chatId: string;
+  payload: Snapshot;
+  hash: string;
+}): Promise<BenchmarkSnapshot> {
+  try {
+    const [snapshot] = await db
+      .insert(benchmarkSnapshot)
+      .values({
+        chatId,
+        payload,
+        hash,
+      })
+      .returning();
+
+    return snapshot;
+  } catch (error) {
+    console.error("createBenchmarkSnapshot error:", error);
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to create benchmark snapshot"
+    );
+  }
+}
+
+/**
+ * Gets the latest benchmark snapshot for a chat
+ */
+export async function getBenchmarkSnapshotByChat({
+  chatId,
+}: {
+  chatId: string;
+}): Promise<BenchmarkSnapshot | null> {
+  try {
+    const [snapshot] = await db
+      .select()
+      .from(benchmarkSnapshot)
+      .where(eq(benchmarkSnapshot.chatId, chatId))
+      .orderBy(desc(benchmarkSnapshot.createdAt))
+      .limit(1);
+
+    return snapshot ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get benchmark snapshot"
+    );
+  }
+}
+
+/**
+ * Gets a benchmark snapshot by ID
+ */
+export async function getBenchmarkSnapshotById({
+  id,
+}: {
+  id: string;
+}): Promise<BenchmarkSnapshot | null> {
+  try {
+    const [snapshot] = await db
+      .select()
+      .from(benchmarkSnapshot)
+      .where(eq(benchmarkSnapshot.id, id))
+      .limit(1);
+
+    return snapshot ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get benchmark snapshot by id"
+    );
+  }
+}
+
+// ============================================================================
+// Benchmark Run Queries
+// ============================================================================
+
+/**
+ * Creates a new benchmark run
+ */
+export async function createBenchmarkRun({
+  chatId,
+  snapshotId,
+  config,
+}: {
+  chatId: string;
+  snapshotId: string;
+  config: BenchmarkConfig;
+}): Promise<BenchmarkRun> {
+  try {
+    const [run] = await db
+      .insert(benchmarkRun)
+      .values({
+        chatId,
+        snapshotId,
+        config,
+        status: "pending",
+      })
+      .returning();
+
+    return run;
+  } catch (error) {
+    console.error("createBenchmarkRun error:", error);
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to create benchmark run"
+    );
+  }
+}
+
+/**
+ * Updates a benchmark run with new metrics or status
+ */
+export async function updateBenchmarkRun({
+  runId,
+  patch,
+}: {
+  runId: string;
+  patch: {
+    status?: "pending" | "running" | "completed" | "failed";
+    metricsDeterministic?: DeterministicMetrics;
+    metricsText?: TextMetrics;
+    metricsRag?: RagMetrics;
+    judgeResult?: JudgeResult;
+    comparisons?: ModelComparison[];
+    errorMessage?: string;
+    completedAt?: Date;
+  };
+}): Promise<BenchmarkRun> {
+  try {
+    const [run] = await db
+      .update(benchmarkRun)
+      .set(patch)
+      .where(eq(benchmarkRun.id, runId))
+      .returning();
+
+    return run;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to update benchmark run"
+    );
+  }
+}
+
+/**
+ * Gets a benchmark run by ID
+ */
+export async function getBenchmarkRunById({
+  id,
+}: {
+  id: string;
+}): Promise<BenchmarkRun | null> {
+  try {
+    const [run] = await db
+      .select()
+      .from(benchmarkRun)
+      .where(eq(benchmarkRun.id, id))
+      .limit(1);
+
+    return run ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get benchmark run by id"
+    );
+  }
+}
+
+/**
+ * Gets all benchmark runs for a chat
+ */
+export async function getBenchmarkRunsByChat({
+  chatId,
+}: {
+  chatId: string;
+}): Promise<BenchmarkRun[]> {
+  try {
+    return await db
+      .select()
+      .from(benchmarkRun)
+      .where(eq(benchmarkRun.chatId, chatId))
+      .orderBy(desc(benchmarkRun.createdAt));
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get benchmark runs for chat"
+    );
+  }
+}
+
+/**
+ * Gets the latest benchmark run for a chat
+ */
+export async function getLatestBenchmarkRun({
+  chatId,
+}: {
+  chatId: string;
+}): Promise<BenchmarkRun | null> {
+  try {
+    const [run] = await db
+      .select()
+      .from(benchmarkRun)
+      .where(eq(benchmarkRun.chatId, chatId))
+      .orderBy(desc(benchmarkRun.createdAt))
+      .limit(1);
+
+    return run ?? null;
+  } catch (_error) {
+    throw new ChatSDKError(
+      "bad_request:database",
+      "Failed to get latest benchmark run"
     );
   }
 }

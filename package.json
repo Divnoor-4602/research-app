@@ -1,5 +1,5 @@
 {
-  "name": "ai-chatbot",
+  "name": "dsm5-research-app",
   "version": "3.1.0",
   "private": true,
   "scripts": {
@@ -15,7 +15,8 @@
     "db:pull": "drizzle-kit pull",
     "db:check": "drizzle-kit check",
     "db:up": "drizzle-kit up",
-    "test": "export PLAYWRIGHT=True && pnpm exec playwright test"
+    "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
+    "ingest:dsm": "tsx scripts/ingest-dsm.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.15",
@@ -69,8 +70,10 @@
     "next": "16.0.10",
     "next-auth": "5.0.0-beta.25",
     "next-themes": "^0.3.0",
+    "openai": "^6.16.0",
     "orderedmap": "^2.1.1",
     "papaparse": "^5.5.2",
+    "pdf-parse": "^2.4.5",
     "postgres": "^3.4.4",
     "prosemirror-example-setup": "^1.2.3",
     "prosemirror-inputrules": "^1.4.0",

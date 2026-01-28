@@ -64,6 +64,41 @@
       "when": 1768479010084,
       "tag": "0008_flat_forgotten_one",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1769556688903,
+      "tag": "0009_amused_firebird",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1769650000000,
+      "tag": "0010_add_document_chatid",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1769750000000,
+      "tag": "0011_add_dsm_rag_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1769850000000,
+      "tag": "0012_add_dsm_item_response_evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1769950000000,
+      "tag": "0013_add_benchmark_tables",
+      "breakpoints": true
     }
   ]
 }

@@ -34,6 +34,10 @@ export const postRequestBodySchema = z.object({
   messages: z.array(messageSchema).optional(),
   selectedChatModel: z.string(),
   selectedVisibilityType: z.enum(["public", "private"]),
+  // DSM-5 screening mode
+  isDsm5Mode: z.boolean().optional().default(false),
+  // RAG mode for DSM-5 diagnosis
+  ragMode: z.enum(["off", "citations", "grounded"]).optional().default("off"),
 });
 
 export type PostRequestBody = z.infer<typeof postRequestBodySchema>;
