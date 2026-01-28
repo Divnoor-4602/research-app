@@ -22,6 +22,7 @@ import {
   createBenchmarkSnapshot,
   getBenchmarkSnapshotByChat,
   getChatById,
+  getDocumentById,
   getDsmSessionByChatId,
   getDocumentsByChatId,
   getItemResponsesBySessionId,
@@ -71,8 +72,12 @@ async function getOrCreateSnapshot(chatId: string): Promise<{
 
   // Load report document
   const documents = await getDocumentsByChatId({ chatId });
-  const reportDoc = documents.find((d) => d.kind === "report");
-  const reportContent = reportDoc?.content ?? "";
+  const reportDocMeta = documents.find((d) => d.kind === "report");
+  let reportContent = "";
+  if (reportDocMeta) {
+    const fullDoc = await getDocumentById({ id: reportDocMeta.id });
+    reportContent = fullDoc?.content ?? "";
+  }
 
   // Build snapshot payload
   const payload: Omit<Snapshot, "snapshotId" | "hash"> = {

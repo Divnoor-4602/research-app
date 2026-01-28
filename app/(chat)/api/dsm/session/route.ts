@@ -33,7 +33,7 @@ export async function GET(request: Request) {
 
   const dsmSession = await getDsmSessionByChatId({ chatId });
   if (!dsmSession) {
-    return new ChatSDKError("not_found:dsm_session").toResponse();
+    return new ChatSDKError("not_found:api", "No DSM-5 session found for this chat").toResponse();
   }
 
   const itemResponses = await getItemResponsesBySessionId({
