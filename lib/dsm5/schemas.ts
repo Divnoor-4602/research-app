@@ -349,7 +349,7 @@ export const llmScoringOutputSchema = z.object({
       score: z.number().int().min(0).max(4),
       ambiguity: z.number().int().min(1).max(10),
       evidenceQuotes: z.array(z.string()).max(3),
-      evidenceSummary: z.string().optional(),
+      evidenceSummary: z.string().nullable(), // Must be nullable, not optional - OpenAI structured outputs requires all fields
       confidence: z.number().min(0).max(1),
       inferenceReasoning: z.string(),
     })

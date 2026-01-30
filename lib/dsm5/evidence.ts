@@ -62,7 +62,7 @@ export function extractEvidenceSpans(
   patientText: string,
   llmQuotes: string[],
   messageIndex: number,
-  llmSummary?: string
+  llmSummary?: string | null
 ): EvidenceSpan {
   const spans: Span[] = [];
   const normalizedText = patientText.toLowerCase();
